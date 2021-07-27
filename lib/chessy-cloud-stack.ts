@@ -3,12 +3,20 @@ import * as s3 from "@aws-cdk/aws-s3";
 import * as dynamodb from "@aws-cdk/aws-dynamodb";
 import * as sqs from "@aws-cdk/aws-sqs";
 import * as lambda from "@aws-cdk/aws-lambda";
+import * as apigateway from "@aws-cdk/aws-apigateway";
+import * as iam from "@aws-cdk/aws-iam";
 
 import { BlockPublicAccess } from "@aws-cdk/aws-s3";
 import { RemovalPolicy } from "@aws-cdk/core";
 import { AttributeType, BillingMode } from "@aws-cdk/aws-dynamodb";
 import { Duration } from "@aws-cdk/aws-dynamodb/node_modules/@aws-cdk/core";
 import { Code, Runtime } from "@aws-cdk/aws-lambda";
+import {
+  EndpointType,
+  Integration,
+  IntegrationType,
+  PassthroughBehavior,
+} from "@aws-cdk/aws-apigateway";
 
 export class ChessyCloudStack extends cdk.Stack {
   constructor(scope: cdk.Construct, id: string, props?: cdk.StackProps) {
@@ -16,11 +24,17 @@ export class ChessyCloudStack extends cdk.Stack {
 
     /* S3 Bucket
     --------------------*/
-    const s3LambdaFunctions = new s3.Bucket(this, "chessy-lambda-functions", {
-      bucketName: "chessy-lambda-functions",
-      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
-      removalPolicy: RemovalPolicy.RETAIN,
-    });
+    // const s3LambdaFunctions = new s3.Bucket(this, "chessy-lambda-functions", {
+    //   bucketName: "chessy-lambda-functions",
+    //   blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+    //   removalPolicy: RemovalPolicy.DESTROY
+    // });
+
+    const s3LambdaFunctions = s3.Bucket.fromBucketArn(
+      this,
+      "chessy-lambda-functions",
+      "arn:aws:s3:::chessy-lambda-functions"
+    );
 
     const s3PGNFiles = new s3.Bucket(this, "chessy-pgn-files", {
       bucketName: "chessy-pgn-files",
@@ -69,51 +83,151 @@ export class ChessyCloudStack extends cdk.Stack {
     --------------------*/
     new lambda.Function(this, "chessy-splitter", {
       functionName: "chessy-splitter",
-      description: "Split big PGN files into chunks with a fixed amount of games",
+      description:
+        "Split big PGN files into chunks with a fixed amount of games",
       runtime: Runtime.PYTHON_3_8,
       memorySize: 128,
       timeout: Duration.seconds(13),
-      handler: 'lambda_ChessyPGNSplitter.lambda_handler',
-      code: Code.fromBucket(s3LambdaFunctions, 'lambdaSplitter.zip'),
-      currentVersionOptions:{
-        removalPolicy: RemovalPolicy.DESTROY
+      handler: "lambda_ChessyPGNSplitter.lambda_handler",
+      code: Code.fromBucket(s3LambdaFunctions, "lambdaSplitter.zip"),
+      currentVersionOptions: {
+        removalPolicy: RemovalPolicy.DESTROY,
       },
       environment: {
-        "LOG_LEVEL": "3",
+        LOG_LEVEL: "3",
         // TODO: add the sqs I just created
-        "SQS_URL": "https://sqs.eu-west-2.amazonaws.com/515610816793/PGNGamesToProcessQueue"
-      }
-    })
+        SQS_URL:
+          "https://sqs.eu-west-2.amazonaws.com/515610816793/PGNGamesToProcessQueue",
+      },
+    });
     new lambda.Function(this, "chessy-parser-partial", {
       functionName: "chessy-parser-partial",
       description: "Process a chunk of a PGN file",
       runtime: Runtime.PYTHON_3_8,
       memorySize: 128,
       timeout: Duration.seconds(30),
-      handler: 'lambda_ChessyPGNParserPartial.lambda_handler',
-      code: Code.fromBucket(s3LambdaFunctions, 'lambdaParserPartial.zip'),
-      currentVersionOptions:{
-        removalPolicy: RemovalPolicy.DESTROY
+      handler: "lambda_ChessyPGNParserPartial.lambda_handler",
+      code: Code.fromBucket(s3LambdaFunctions, "lambdaParserPartial.zip"),
+      currentVersionOptions: {
+        removalPolicy: RemovalPolicy.DESTROY,
       },
       environment: {
-        "LOG_LEVEL": "3",
-      }
+        LOG_LEVEL: "3",
+      },
     });
     new lambda.Function(this, "chessy-failer", {
       functionName: "chessy-failer",
-      description: "Process the messages in the DLQ, consuming them while recording them in the DB",
+      description:
+        "Process the messages in the DLQ, consuming them while recording them in the DB",
       runtime: Runtime.PYTHON_3_8,
       memorySize: 128,
       timeout: Duration.seconds(8),
-      handler: 'lambda_ChessyPGNFailedProcess.lambda_handler',
-      code: Code.fromBucket(s3LambdaFunctions, 'lambdaFailer.zip'),
-      currentVersionOptions:{
-        removalPolicy: RemovalPolicy.DESTROY
+      handler: "lambda_ChessyPGNFailedProcess.lambda_handler",
+      code: Code.fromBucket(s3LambdaFunctions, "lambdaFailer.zip"),
+      currentVersionOptions: {
+        removalPolicy: RemovalPolicy.DESTROY,
       },
       environment: {
-        "LOG_LEVEL": "3",
-      }
+        LOG_LEVEL: "3",
+      },
     });
 
+    /* API Gateway
+    --------------------*/
+    const apiGtwRest = new apigateway.RestApi(this, "chessy-rest", {
+      restApiName: "chessy-rest",
+      description: "Manage data for chessy project",
+      deploy: true,
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigateway.Cors.ALL_ORIGINS,
+        allowMethods: apigateway.Cors.ALL_METHODS,
+      },
+    });
+
+    const getPolicy = new iam.Policy(this, "getlistPolicy", {
+      statements: [
+        new iam.PolicyStatement({
+          actions: ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:Query"],
+          effect: iam.Effect.ALLOW,
+          resources: [
+            "arn:aws:dynamodb:eu-west-2:515610816793:table/chess_games",
+          ],
+        }),
+      ],
+    });
+
+    const getRole = new iam.Role(this, "getRole", {
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+    });
+    getRole.attachInlinePolicy(getPolicy);
+
+    // GETLIST
+
+    const integrationResponsesArray = [
+      { statusCode: "200" },
+      {
+        selectionPattern: "400",
+        statusCode: "400",
+        responseTemplates: {
+          "application/json": `{
+            "error": "Bad input!"
+          }`,
+        },
+      },
+      {
+        selectionPattern: "5\\d{2}",
+        statusCode: "500",
+        responseTemplates: {
+          "application/json": `{
+            "error": "Internal Service Error!"
+          }`,
+        },
+      },
+    ];
+    const methodOptions = {
+      methodResponses: [
+        { statusCode: "200" },
+        { statusCode: "400" },
+        { statusCode: "500" },
+      ],
+    };
+
+    const dynamodbintegration = new apigateway.AwsIntegration({
+      action: "Scan",
+      region: "eu-west-2",
+      service: "dynamodb",
+      options: {
+        credentialsRole: getRole,
+        integrationResponses: integrationResponsesArray,
+        requestTemplates: {
+          "application/json": `{
+              "TableName": "chess_games",
+              "ProjectionExpression": "id, Black, White, Event, #r",
+              "ExpressionAttributeNames":{"#r": "Result"}
+          }`,
+        },
+      },
+    });
+    const resource = apiGtwRest.root.addResource("getallgames_");
+    resource.addMethod("POST", dynamodbintegration, methodOptions);
+
+    // GETGAME
+    const dynamodbintegrationGG = new apigateway.AwsIntegration({
+      action: "GetItem",
+      region: "eu-west-2",
+      service: "dynamodb",
+      options: {
+        credentialsRole: getRole,
+        integrationResponses: integrationResponsesArray,
+        requestTemplates: {
+          "application/json": `{
+            "TableName": "chess_games",
+            "Key": { "id":{"S": "$input.path('$.gameId')"}}
+          }`,
+        },
+      },
+    });
+    const resourceGG = apiGtwRest.root.addResource("getgame_");
+    resourceGG.addMethod("POST", dynamodbintegrationGG, methodOptions);
   }
 }
