@@ -5,18 +5,12 @@ import * as sqs from "@aws-cdk/aws-sqs";
 import * as lambda from "@aws-cdk/aws-lambda";
 import * as apigateway from "@aws-cdk/aws-apigateway";
 import * as iam from "@aws-cdk/aws-iam";
+import * as lambdaEventSource from "@aws-cdk/aws-lambda-event-sources";
 
 import { BlockPublicAccess } from "@aws-cdk/aws-s3";
-import { RemovalPolicy } from "@aws-cdk/core";
+import { Duration, RemovalPolicy } from "@aws-cdk/core";
 import { AttributeType, BillingMode } from "@aws-cdk/aws-dynamodb";
-import { Duration } from "@aws-cdk/aws-dynamodb/node_modules/@aws-cdk/core";
 import { Code, Runtime } from "@aws-cdk/aws-lambda";
-import {
-  EndpointType,
-  Integration,
-  IntegrationType,
-  PassthroughBehavior,
-} from "@aws-cdk/aws-apigateway";
 
 export class ChessyCloudStack extends cdk.Stack {
   constructor(scope: cdk.Construct, id: string, props?: cdk.StackProps) {
@@ -65,11 +59,10 @@ export class ChessyCloudStack extends cdk.Stack {
     --------------------*/
     const deadLetterQueue = new sqs.Queue(this, "chessy-pgn-games-failed-dlq", {
       queueName: "chessy-pgn-games-failed-dlq",
-
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    new sqs.Queue(this, "chessy-pgn-games-to-process", {
+    const gamesToProcessQueue = new sqs.Queue(this, "chessy-pgn-games-to-process", {
       queueName: "chessy-pgn-games-to-process",
       visibilityTimeout: Duration.minutes(2),
       deadLetterQueue: {
@@ -81,7 +74,7 @@ export class ChessyCloudStack extends cdk.Stack {
 
     /* Lambda Functions
     --------------------*/
-    new lambda.Function(this, "chessy-splitter", {
+    const lambdaSplitter = new lambda.Function(this, "chessy-splitter", {
       functionName: "chessy-splitter",
       description:
         "Split big PGN files into chunks with a fixed amount of games",
@@ -95,9 +88,7 @@ export class ChessyCloudStack extends cdk.Stack {
       },
       environment: {
         LOG_LEVEL: "3",
-        // TODO: add the sqs I just created
-        SQS_URL:
-          "https://sqs.eu-west-2.amazonaws.com/515610816793/PGNGamesToProcessQueue",
+        SQS_URL: gamesToProcessQueue.queueUrl
       },
     });
     new lambda.Function(this, "chessy-parser-partial", {
@@ -229,5 +220,23 @@ export class ChessyCloudStack extends cdk.Stack {
     });
     const resourceGG = apiGtwRest.root.addResource("getgame_");
     resourceGG.addMethod("POST", dynamodbintegrationGG, methodOptions);
+
+    /* CONNECTIONS */
+    // 1. trigger lambda 'splitter' when s3 gets the object
+    s3PGNFiles.grantRead(lambdaSplitter);
+
+    const s3PGNFilesEventSource = new lambdaEventSource.S3EventSource(s3PGNFiles, {
+      events: [
+        s3.EventType.OBJECT_CREATED
+      ]
+    })
+    lambdaSplitter.addEventSource(s3PGNFilesEventSource);
+    gamesToProcessQueue.grantSendMessages(lambdaSplitter);
+
+    // 2. pass the name of the queue to 'splitter' to output the messages
+    // 3. trigger lambda 'parser partial' when messages in the queue
+    //    pass tablenames to 'parser partial'
+    // 4. trigger lambda 'failed-pgn-games' when dlq gets messages
+    //    pass tablenames to this lambda
   }
 }
