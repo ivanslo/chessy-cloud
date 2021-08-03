@@ -46,13 +46,15 @@ export class ChessyCloudStack extends cdk.Stack {
       "chessy_pgn_files_succeeded",
     ];
 
+    const dynamoDbTables = []
     for (const table of tables) {
-      new dynamodb.Table(this, table, {
+      const t = new dynamodb.Table(this, table, {
         tableName: table,
         partitionKey: { name: "id", type: AttributeType.STRING },
         billingMode: BillingMode.PAY_PER_REQUEST,
         removalPolicy: RemovalPolicy.DESTROY,
       });
+      dynamoDbTables.push(t)
     }
 
     /* SQS Queues
@@ -91,7 +93,7 @@ export class ChessyCloudStack extends cdk.Stack {
         SQS_URL: gamesToProcessQueue.queueUrl
       },
     });
-    new lambda.Function(this, "chessy-parser-partial", {
+    const lambdaParser = new lambda.Function(this, "chessy-parser-partial", {
       functionName: "chessy-parser-partial",
       description: "Process a chunk of a PGN file",
       runtime: Runtime.PYTHON_3_8,
@@ -104,9 +106,13 @@ export class ChessyCloudStack extends cdk.Stack {
       },
       environment: {
         LOG_LEVEL: "3",
+        TABLE_CHESS_GAMES: "chessy_games",
+        TABLE_CHESS_GAMES_FAILED: "chessy_games_failed",
+        TABLE_PGN_FILES_FAILED: "chessy_pgn_files_failed",
+        TABLE_PGN_FILES_SUCCEEDED: "chessy_pgn_files_succeeded"
       },
     });
-    new lambda.Function(this, "chessy-failer", {
+    const lambdaFailer = new lambda.Function(this, "chessy-failer", {
       functionName: "chessy-failer",
       description:
         "Process the messages in the DLQ, consuming them while recording them in the DB",
@@ -120,6 +126,8 @@ export class ChessyCloudStack extends cdk.Stack {
       },
       environment: {
         LOG_LEVEL: "3",
+        TABLE_PGN_FILES_FAILED: "chessy_pgn_files_failed",
+        //TODO: do the same, pass the table names 
       },
     });
 
@@ -223,6 +231,7 @@ export class ChessyCloudStack extends cdk.Stack {
 
     /* CONNECTIONS */
     // 1. trigger lambda 'splitter' when s3 gets the object
+    // 2. pass the name of the queue to 'splitter' to output the messages
     s3PGNFiles.grantRead(lambdaSplitter);
 
     const s3PGNFilesEventSource = new lambdaEventSource.S3EventSource(s3PGNFiles, {
@@ -233,10 +242,27 @@ export class ChessyCloudStack extends cdk.Stack {
     lambdaSplitter.addEventSource(s3PGNFilesEventSource);
     gamesToProcessQueue.grantSendMessages(lambdaSplitter);
 
-    // 2. pass the name of the queue to 'splitter' to output the messages
     // 3. trigger lambda 'parser partial' when messages in the queue
     //    pass tablenames to 'parser partial'
+
+    s3PGNFiles.grantRead(lambdaParser);
+    gamesToProcessQueue.grantConsumeMessages(lambdaParser);
+    const sqsPGNGamesEventSource = new lambdaEventSource.SqsEventSource(gamesToProcessQueue, {
+      batchSize: 1
+    });
+    lambdaParser.addEventSource(sqsPGNGamesEventSource)
+
+    for( const table of dynamoDbTables) {
+      table.grantWriteData(lambdaParser)
+    }
+
     // 4. trigger lambda 'failed-pgn-games' when dlq gets messages
     //    pass tablenames to this lambda
+    deadLetterQueue.grantConsumeMessages(lambdaFailer);
+    const sqsDLQEventSource = new lambdaEventSource.SqsEventSource(deadLetterQueue);
+    lambdaFailer.addEventSource(sqsDLQEventSource);
+
+    (dynamoDbTables[3] as dynamodb.Table).grantWriteData(lambdaFailer);
+
   }
 }
