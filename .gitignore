@@ -3,7 +3,6 @@
 *.d.ts
 node_modules
 package-lock.json
-bin
 
 # CDK asset staging directory
 .cdk.staging

@@ -3,9 +3,11 @@ import * as s3 from "@aws-cdk/aws-s3";
 import * as dynamodb from "@aws-cdk/aws-dynamodb";
 import * as sqs from "@aws-cdk/aws-sqs";
 import * as lambda from "@aws-cdk/aws-lambda";
+import * as lambdaNodeJs from "@aws-cdk/aws-lambda-nodejs";
 import * as apigateway from "@aws-cdk/aws-apigateway";
 import * as iam from "@aws-cdk/aws-iam";
 import * as lambdaEventSource from "@aws-cdk/aws-lambda-event-sources";
+import * as path from "path";
 
 /*** IMPORTANT:
 The ChessyCloudStack assumes the following lambda codes are present in s3 "arn:aws:s3:::chessy-lambda-functions":
@@ -278,5 +280,41 @@ export class ChessyCloudStack extends cdk.Stack {
     });
     const resourceGG = apiGtwRest.root.addResource("getgame_");
     resourceGG.addMethod("POST", dynamodbintegrationGG, methodOptions);
+
+    /* API Gateway + Lambda Integration  (approach #2)
+    ------------------------------------*/
+    const getAllGamesFn = new lambdaNodeJs.NodejsFunction(
+      this,
+      "get-all-games-lambda-fn",
+      {
+        functionName: "get-all-games-lambda-fn",
+        timeout: cdk.Duration.seconds(5),
+        runtime: lambda.Runtime.NODEJS_14_X,
+        handler: "main",
+        entry: path.join(__dirname, `../lambdasFn/getAllGames.ts`),
+        bundling: {
+          minify: true,
+          externalModules: ["aws-sdk", "aws-lambda"],
+        },
+      }
+    );
+
+    dbtable_games.grantReadData(getAllGamesFn);
+
+    const apiGtwRest2 = new apigateway.RestApi(this, "chessy-rest-2", {
+      restApiName: "chessy-rest-2",
+      description: "Manage endpoint for chessy project",
+      deploy: true,
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigateway.Cors.ALL_ORIGINS,
+        allowMethods: apigateway.Cors.ALL_METHODS,
+      },
+    });
+    const lambdaIntegration = new apigateway.LambdaIntegration(getAllGamesFn, {
+      // requestTemplates: {"application/json": '{"statusCode":"200"}'},
+      integrationResponses: integrationResponsesArray,
+    });
+    const res = apiGtwRest2.root.addResource("games");
+    res.addMethod("GET", lambdaIntegration, methodOptions);
   }
 }
