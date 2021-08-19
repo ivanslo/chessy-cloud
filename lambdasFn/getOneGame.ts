@@ -1,6 +1,6 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
-
 import { DynamoDB } from "aws-sdk";
+import { DEFAULT_HEADERS } from "./Constants";
 
 export async function main(
   event: APIGatewayProxyEventV2
@@ -17,10 +17,10 @@ export async function main(
       throw Error("No `gameId` found");
     }
 
-    const result: DynamoDB.GetItemOutput= await dynamoDb
+    const result: DynamoDB.GetItemOutput = await dynamoDb
       .getItem({
         TableName: "chessy_games",
-        Key: { id: { S: gameId }  },
+        Key: { id: { S: gameId } },
       })
       .promise();
 
@@ -30,6 +30,7 @@ export async function main(
     }
     return {
       body: JSON.stringify({ game: item }),
+      headers: DEFAULT_HEADERS,
       statusCode: 200,
     };
   } catch (e) {

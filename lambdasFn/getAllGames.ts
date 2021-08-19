@@ -1,6 +1,6 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
-
 import { DynamoDB } from "aws-sdk";
+import { DEFAULT_HEADERS } from "./Constants";
 
 export async function main(
   event: APIGatewayProxyEventV2
@@ -27,6 +27,7 @@ export async function main(
     // TODO: also return `result.LastEvaluatedKey` to allow pagination
     return {
       body: JSON.stringify({ games: items }),
+      headers: DEFAULT_HEADERS,
       statusCode: 200,
     };
   } catch (e) {
